@@ -15,7 +15,7 @@ One static Go binary, shipped three ways:
 | Packaging | For |
 |---|---|
 | LXC container on the cluster, created by a one-line installer | Most Proxmox users (recommended) |
-| OCI image + `docker-compose.yml` with a `cloudflared` sidecar | Anyone already running Docker |
+| OCI image (`ghcr.io/proxcommander/proxcommander-gateway`, amd64 and arm64) + `docker-compose.yml` with a `cloudflared` sidecar | Anyone already running Docker |
 | Binary + systemd unit | Any Linux machine |
 
 It runs anywhere that can reach the Proxmox nodes on 8006. It is never installed on a Proxmox host itself.
@@ -29,7 +29,7 @@ app ──HTTPS──▶ Cloudflare Tunnel / LAN / user's proxy ──▶ gatewa
 1. **Setup.** The admin adds the cluster's nodes. The gateway fetches each node's certificate and shows the fingerprint; once confirmed, the cluster CA (or leaf) is pinned and any other certificate is a hard failure. There is no "ignore TLS errors" switch.
 2. **Pairing.** The admin creates a one-time pairing code (shown as text and a QR code). The app generates an Ed25519 key on the device (native: stored in the keychain; web: a non-extractable WebCrypto key) and registers its public key with the code. Devices can be listed and revoked; revoking a device ends its sessions and closes its open console streams.
 3. **Sign-in.** The app sends a Proxmox username and password once, signed with its device key. The gateway calls `POST /access/ticket`, keeps the ticket and CSRF token in memory, renews the ticket every 15 minutes (it lives 2 hours), and returns a gateway session token. Passwords are never stored. The Proxmox ticket never reaches the app.
-4. **API calls.** The app calls `/api2/json/...` on the gateway with `Authorization: PCGateway <session>`. The gateway checks the session and device, checks the call against the device's profile, strips any client `Authorization`/`Cookie`, adds `Authorization: PVEAuthCookie=<ticket>` (and `CSRFPreventionToken` on writes), forwards to the first reachable node, and streams the response back with CORS headers for the allowed app origins. Reads may fail over to the next node; writes never retry on another node after a timeout.
+4. **API calls.** The app calls `/api2/json/...` on the gateway with `Authorization: PCGateway <session>`. The gateway checks the session and device, checks the call against the device's profile, strips any client `Authorization`/`Cookie`, adds `Authorization: PVEAuthCookie=<ticket>` (and `CSRFPreventionToken` on writes), forwards to the first reachable node, and streams the response back with CORS headers for the allowed app origins (by default only the hosted web app at `https://proxcommander.app`; development origins such as `http://localhost:8081` are added explicitly). Reads may fail over to the next node; writes never retry on another node after a timeout.
 5. **Consoles.** The app requests `vncproxy`/`termproxy` through the gateway, then opens a WebSocket to the gateway, which upgrades to the node's `vncwebsocket` with the ticket and pipes frames both ways.
 
 ## Gateway API
@@ -45,7 +45,7 @@ app ──HTTPS──▶ Cloudflare Tunnel / LAN / user's proxy ──▶ gatewa
 
 ## Policy
 
-- Default deny. Two built-in profiles: **read-only** (GETs of cluster, node, guest, storage and task status) and **operator** (read-only plus guest power actions, consoles and task logs).
+- Default deny. Two built-in profiles: **read-only** (GETs of cluster, node, guest, storage and task status) and **operator** (read-only plus guest power actions, consoles and task logs). Operator consoles include LXC `termproxy`, which is a root shell in a container whose console mode is `shell`.
 - Root-equivalent endpoints (node shell, `/access` user and ACL management, storage and network config writes, `apt`, `ceph` writes) stay blocked unless an admin adds them explicitly.
 - Paths are normalised before matching; encoded dot segments and anything outside `/api2/json/` are rejected.
 
