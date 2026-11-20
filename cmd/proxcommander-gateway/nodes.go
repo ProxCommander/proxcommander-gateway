@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -106,12 +105,16 @@ func (c *cli) nodesAdd(args []string) int {
 			return c.fail(fmt.Errorf("fingerprint %s was not presented by %s; not pinning", fp, nodeURL))
 		}
 	}
+	if idx > 0 && !pin.ClusterCA(chain[idx]) {
+		return c.fail(fmt.Errorf("certificate [%d] is not a private self-signed cluster CA; pinning it would also trust other hosts it issues for. Pin the node's own certificate instead (--pin-leaf)", idx))
+	}
 	fp := pin.Fingerprint(chain[idx].Raw)
 	// The pin must verify the chain the node presents right now.
-	if err := pin.Verify([]string{fp}, chain); err != nil {
+	u, _ := url.Parse(nodeURL)
+	if err := pin.Verify([]string{fp}, chain, u.Hostname()); err != nil {
 		return c.fail(err)
 	}
-	fmt.Fprintf(c.stdout, "\nWill pin [%d] %s: %s\n", idx, describe(chain[idx], idx), fp)
+	fmt.Fprintf(c.stdout, "\nWill pin [%d] %s: %s\n", idx, describe(idx), fp)
 
 	if *want == "" && !*yes {
 		if !c.interactive {
@@ -125,22 +128,26 @@ func (c *cli) nodesAdd(args []string) int {
 		}
 	}
 
-	st.Nodes = append(st.Nodes, state.Node{Name: *name, URL: nodeURL, Fingerprints: []string{fp}, AddedAt: time.Now().UTC()})
-	if err := st.Save(common.StateDir); err != nil {
+	err = state.Update(common.StateDir, func(st *state.State) error {
+		// Re-check under the lock: another run may have added it meanwhile.
+		if st.FindNode(*name) >= 0 || st.FindNode(nodeURL) >= 0 {
+			return fmt.Errorf("node %s (%s) already exists; remove it first", *name, nodeURL)
+		}
+		st.Nodes = append(st.Nodes, state.Node{Name: *name, URL: nodeURL, Fingerprints: []string{fp}, AddedAt: time.Now().UTC()})
+		return nil
+	})
+	if err != nil {
 		return c.fail(err)
 	}
 	fmt.Fprintf(c.stdout, "Added node %s (%s). Restart the gateway to apply.\n", *name, nodeURL)
 	return 0
 }
 
-func describe(cert *x509.Certificate, idx int) string {
-	switch {
-	case idx == 0:
+func describe(idx int) string {
+	if idx == 0 {
 		return "the node's own certificate"
-	case pin.SelfSigned(cert):
-		return "the cluster CA"
 	}
-	return "an intermediate CA"
+	return "the cluster CA"
 }
 
 func (c *cli) nodesList(args []string) int {
@@ -181,21 +188,21 @@ func (c *cli) nodesRemove(args []string) int {
 		fmt.Fprintln(c.stderr, "usage: proxcommander-gateway nodes remove <name|url>")
 		return 2
 	}
-	st, err := state.Load(common.StateDir)
-	if err != nil {
-		return c.fail(err)
-	}
 	key := pos[0]
 	if u, err := state.NormalizeNodeURL(key); err == nil {
 		key = u
 	}
-	i := st.FindNode(key)
-	if i < 0 {
-		return c.fail(fmt.Errorf("no node %q", pos[0]))
-	}
-	removed := st.Nodes[i]
-	st.Nodes = append(st.Nodes[:i], st.Nodes[i+1:]...)
-	if err := st.Save(common.StateDir); err != nil {
+	var removed state.Node
+	err = state.Update(common.StateDir, func(st *state.State) error {
+		i := st.FindNode(key)
+		if i < 0 {
+			return fmt.Errorf("no node %q", pos[0])
+		}
+		removed = st.Nodes[i]
+		st.Nodes = append(st.Nodes[:i], st.Nodes[i+1:]...)
+		return nil
+	})
+	if err != nil {
 		return c.fail(err)
 	}
 	fmt.Fprintf(c.stdout, "Removed node %s (%s). Restart the gateway to apply.\n", removed.Name, removed.URL)

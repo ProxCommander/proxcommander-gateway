@@ -108,3 +108,26 @@ func TestVersionAndUnknown(t *testing.T) {
 		t.Fatalf("unknown command: %d", code)
 	}
 }
+
+func TestNodesAddRefusesIntermediatePin(t *testing.T) {
+	root := testpki.CA(t, "root")
+	inter := testpki.Intermediate(t, "intermediate", root)
+	leaf := testpki.Leaf(t, "pve1", inter)
+	srv := httptest.NewUnstartedServer(http.NotFoundHandler())
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{testpki.TLSCert(leaf, inter)}}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+
+	c, out, dir := newCLI(t, "", false)
+	if code := c.run([]string{"nodes", "add", srv.URL, "--fingerprint", pin.Fingerprint(inter.Cert.Raw)}); code == 0 {
+		t.Fatalf("intermediate CA pinned:\n%s", out)
+	}
+	// With no cluster CA presented, the default is the leaf.
+	if code := c.run([]string{"nodes", "add", srv.URL, "--yes"}); code != 0 {
+		t.Fatalf("add: %d\n%s", code, out)
+	}
+	st, _ := state.Load(dir)
+	if st.Nodes[0].Fingerprints[0] != pin.Fingerprint(leaf.Cert.Raw) {
+		t.Fatal("expected the leaf to be pinned")
+	}
+}

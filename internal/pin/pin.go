@@ -1,10 +1,12 @@
 // Package pin verifies upstream TLS certificates against pinned SHA-256
 // fingerprints instead of the system trust store.
 //
-// A pin is either the node's leaf certificate or a self-signed CA (the
-// Proxmox cluster CA) that the node presents in its chain. A CA pin only
-// matches when the leaf cryptographically chains to that CA, so an attacker
-// cannot pass by appending the public CA certificate to their own chain.
+// A pin is either the node's leaf certificate or a CA that the node presents
+// in its chain. A CA pin only matches when the leaf cryptographically chains
+// to that CA, so an attacker cannot pass by appending the CA certificate to
+// their own chain. A CA pin skips the hostname check only when the CA is a
+// private cluster CA (self-signed and not publicly trusted); any other CA
+// issues for many hosts, so the leaf must also be valid for the node's host.
 package pin
 
 import (
@@ -53,8 +55,9 @@ func ParseFingerprint(s string) (string, error) {
 // ErrNoPins is returned when a TLS config is requested without any pins.
 var ErrNoPins = errors.New("pin: no pinned fingerprints")
 
-// Verify checks a presented chain (leaf first) against the pins.
-func Verify(pins []string, chain []*x509.Certificate) error {
+// Verify checks a presented chain (leaf first) against the pins. serverName
+// is the node's host name or IP, used when a CA pin needs a hostname check.
+func Verify(pins []string, chain []*x509.Certificate, serverName string) error {
 	if len(pins) == 0 {
 		return ErrNoPins
 	}
@@ -85,14 +88,19 @@ func Verify(pins []string, chain []*x509.Certificate) error {
 				inter.AddCert(o)
 			}
 		}
-		// No DNSName: nodes are often addressed by IP and the pinned CA is
-		// private to the cluster. Validity periods and signatures are checked.
-		_, err := leaf.Verify(x509.VerifyOptions{
+		opts := x509.VerifyOptions{
 			Roots:         roots,
 			Intermediates: inter,
 			KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
-		})
-		if err == nil {
+		}
+		if !ClusterCA(c) {
+			if serverName == "" {
+				continue
+			}
+			opts.DNSName = serverName
+		}
+		// Validity periods and signatures are always checked.
+		if _, err := leaf.Verify(opts); err == nil {
 			return nil
 		}
 	}
@@ -103,7 +111,8 @@ func Verify(pins []string, chain []*x509.Certificate) error {
 // nodes. Go's standard verifier is replaced (InsecureSkipVerify) because
 // Proxmox certificates are not publicly trusted; VerifyConnection always
 // enforces the pins in its place, and there is no way to turn it off.
-func TLSConfig(pins []string) (*tls.Config, error) {
+// serverName is the node's host name or IP address.
+func TLSConfig(pins []string, serverName string) (*tls.Config, error) {
 	if len(pins) == 0 {
 		return nil, ErrNoPins
 	}
@@ -115,9 +124,10 @@ func TLSConfig(pins []string) (*tls.Config, error) {
 	pinned := append([]string(nil), pins...)
 	return &tls.Config{
 		MinVersion:         tls.VersionTLS12,
+		ServerName:         serverName,
 		InsecureSkipVerify: true, // replaced by VerifyConnection below
 		VerifyConnection: func(cs tls.ConnectionState) error {
-			return Verify(pinned, cs.PeerCertificates)
+			return Verify(pinned, cs.PeerCertificates, serverName)
 		},
 	}, nil
 }
@@ -141,13 +151,12 @@ func FetchChain(ctx context.Context, addr string) ([]*x509.Certificate, error) {
 	return conn.(*tls.Conn).ConnectionState().PeerCertificates, nil
 }
 
-// AutoPin chooses which presented certificate to pin: the top-most
-// self-signed CA if the node sends one (the Proxmox cluster CA), otherwise
-// the leaf. A public intermediate is never chosen, because without a
-// hostname check it would accept any certificate from that issuer.
+// AutoPin chooses which presented certificate to pin: the top-most private
+// cluster CA if the node sends one, otherwise the leaf. A public or
+// intermediate CA is never chosen.
 func AutoPin(chain []*x509.Certificate) int {
 	for i := len(chain) - 1; i > 0; i-- {
-		if SelfSigned(chain[i]) {
+		if ClusterCA(chain[i]) {
 			return i
 		}
 	}
@@ -157,4 +166,23 @@ func AutoPin(chain []*x509.Certificate) int {
 // SelfSigned reports whether c is a CA whose signature verifies with its own key.
 func SelfSigned(c *x509.Certificate) bool {
 	return c.IsCA && c.CheckSignatureFrom(c) == nil
+}
+
+// systemRoots loads the public trust store; tests replace it.
+var systemRoots = x509.SystemCertPool
+
+// ClusterCA reports whether c may be pinned as a CA without a hostname
+// check: a self-signed CA that does not chain to a publicly trusted root,
+// such as the Proxmox cluster CA. If the system trust store cannot be
+// loaded, no CA qualifies.
+func ClusterCA(c *x509.Certificate) bool {
+	if !SelfSigned(c) {
+		return false
+	}
+	roots, err := systemRoots()
+	if err != nil || roots == nil {
+		return false
+	}
+	_, err = c.Verify(x509.VerifyOptions{Roots: roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}})
+	return err != nil
 }

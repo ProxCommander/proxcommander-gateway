@@ -23,16 +23,28 @@ type Cert struct {
 // CA creates a self-signed CA.
 func CA(t testing.TB, name string) Cert {
 	t.Helper()
-	return issue(t, name, true, nil)
+	return issue(t, name, true, nil, "")
+}
+
+// Intermediate creates a CA signed by parent.
+func Intermediate(t testing.TB, name string, parent Cert) Cert {
+	t.Helper()
+	return issue(t, name, true, &parent, "")
 }
 
 // Leaf creates a server certificate for 127.0.0.1 signed by parent.
 func Leaf(t testing.TB, name string, parent Cert) Cert {
 	t.Helper()
-	return issue(t, name, false, &parent)
+	return issue(t, name, false, &parent, "")
 }
 
-func issue(t testing.TB, name string, isCA bool, parent *Cert) Cert {
+// LeafFor creates a server certificate for the DNS name host signed by parent.
+func LeafFor(t testing.TB, host string, parent Cert) Cert {
+	t.Helper()
+	return issue(t, host, false, &parent, host)
+}
+
+func issue(t testing.TB, name string, isCA bool, parent *Cert, dnsName string) Cert {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -52,7 +64,11 @@ func issue(t testing.TB, name string, isCA bool, parent *Cert) Cert {
 	} else {
 		tmpl.KeyUsage = x509.KeyUsageDigitalSignature
 		tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
-		tmpl.IPAddresses = []net.IP{net.ParseIP("127.0.0.1")}
+		if dnsName != "" {
+			tmpl.DNSNames = []string{dnsName}
+		} else {
+			tmpl.IPAddresses = []net.IP{net.ParseIP("127.0.0.1")}
+		}
 	}
 	signer, signerKey := tmpl, key
 	if parent != nil {

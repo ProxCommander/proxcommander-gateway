@@ -80,11 +80,10 @@ func New(nodes []Node, opt Options) (*Pool, error) {
 		if err != nil || u.Scheme != "https" || u.Host == "" {
 			return nil, fmt.Errorf("upstream: node %s: invalid URL %q", n.Name, n.URL)
 		}
-		cfg, err := pin.TLSConfig(n.Fingerprints)
+		cfg, err := pin.TLSConfig(n.Fingerprints, u.Hostname())
 		if err != nil {
 			return nil, fmt.Errorf("upstream: node %s: %w", n.Name, err)
 		}
-		cfg.ServerName = u.Hostname()
 		pn := &poolNode{Node: n, host: u.Host}
 		pn.transport = &http.Transport{
 			Proxy:                 nil, // never route upstream traffic via HTTP(S)_PROXY
