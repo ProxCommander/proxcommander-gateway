@@ -32,13 +32,14 @@ func TestDefaults(t *testing.T) {
 
 func TestEnvThenFlags(t *testing.T) {
 	env := map[string]string{
-		"PCG_LISTEN":           ":9000",
-		"PCG_STATE_DIR":        "/tmp/s",
-		"PCG_ALLOWED_HOSTS":    "a.example, b.example",
-		"PCG_CORS_ORIGINS":     "https://x.example",
-		"PCG_PROFILE":          "operator",
-		"PCG_UPSTREAM_TIMEOUT": "5s",
-		"PCG_PVE_API_TOKEN":    "u@pam!t=s",
+		"PCG_LISTEN":                  ":9000",
+		"PCG_STATE_DIR":               "/tmp/s",
+		"PCG_ALLOWED_HOSTS":           "a.example, b.example",
+		"PCG_CORS_ORIGINS":            "https://x.example",
+		"PCG_PROFILE":                 "operator",
+		"PCG_UPSTREAM_TIMEOUT":        "5s",
+		"PCG_PVE_API_TOKEN":           "u@pam!t=s",
+		"PCG_TOKEN_MODE_ALLOW_REMOTE": "true",
 	}
 	s := parse(t, env)
 	if s.Listen != ":9000" || s.StateDir != "/tmp/s" || s.Profile != "operator" ||
@@ -63,5 +64,37 @@ func TestBadEnvTimeout(t *testing.T) {
 	})
 	if err := s.Validate(); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestTokenModeNeedsLoopbackOrOptIn(t *testing.T) {
+	check := func(env map[string]string, args ...string) error {
+		fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		s := ServeFlags(fs, func(k string) string { return env[k] })
+		if err := fs.Parse(args); err != nil {
+			t.Fatal(err)
+		}
+		return s.Validate()
+	}
+	tok := map[string]string{"PCG_PVE_API_TOKEN": "u@pam!t=s"}
+	for _, addr := range []string{"127.0.0.1:8080", "localhost:8080", "[::1]:8080", "127.0.0.2:8080"} {
+		if err := check(tok, "-listen", addr); err != nil {
+			t.Errorf("%s: %v", addr, err)
+		}
+	}
+	for _, addr := range []string{":8080", "0.0.0.0:8080", "[::]:8080", "192.168.1.5:8080", "gw.example.com:8080"} {
+		if err := check(tok, "-listen", addr); err == nil {
+			t.Errorf("%s: token mode allowed without opt-in", addr)
+		}
+		if err := check(tok, "-listen", addr, "-token-mode-allow-remote"); err != nil {
+			t.Errorf("%s with flag: %v", addr, err)
+		}
+		if err := check(map[string]string{"PCG_PVE_API_TOKEN": "x", "PCG_TOKEN_MODE_ALLOW_REMOTE": "1"}, "-listen", addr); err != nil {
+			t.Errorf("%s with env: %v", addr, err)
+		}
+		if err := check(nil, "-listen", addr); err != nil {
+			t.Errorf("%s without token: %v", addr, err)
+		}
 	}
 }

@@ -6,6 +6,8 @@ package config
 import (
 	"flag"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -37,6 +39,9 @@ type Serve struct {
 	// PVEAPIToken is the temporary step-1 upstream credential. Environment
 	// only (PCG_PVE_API_TOKEN); never logged.
 	PVEAPIToken string
+	// AllowRemoteTokenMode permits the token mode on a non-loopback listen
+	// address (needed in a container, or behind a tunnel or reverse proxy).
+	AllowRemoteTokenMode bool
 
 	envTimeoutErr error
 }
@@ -65,6 +70,8 @@ func ServeFlags(fs *flag.FlagSet, env Getenv) *Serve {
 		return nil
 	})
 	fs.StringVar(&s.Profile, "profile", env("PCG_PROFILE"), "policy profile, read-only or operator; overrides the state file (env PCG_PROFILE)")
+	fs.BoolVar(&s.AllowRemoteTokenMode, "token-mode-allow-remote", isTrue(env("PCG_TOKEN_MODE_ALLOW_REMOTE")),
+		"allow PCG_PVE_API_TOKEN on a non-loopback listen address; clients are not authenticated in that mode (env PCG_TOKEN_MODE_ALLOW_REMOTE)")
 	s.AllowedHosts = splitList(env("PCG_ALLOWED_HOSTS"))
 	s.CORSOrigins = splitList(env("PCG_CORS_ORIGINS"))
 	s.UpstreamTimeout = DefaultTimeout
@@ -93,7 +100,31 @@ func (s *Serve) Validate() error {
 	if s.Listen == "" {
 		return fmt.Errorf("listen address is empty")
 	}
+	if s.PVEAPIToken != "" && !s.AllowRemoteTokenMode && !LoopbackListen(s.Listen) {
+		return fmt.Errorf("PCG_PVE_API_TOKEN is set but the gateway listens on %s, beyond this machine. "+
+			"The temporary token mode does not authenticate clients, so anyone who can reach it gets the token's permissions. "+
+			"Listen on 127.0.0.1, or set PCG_TOKEN_MODE_ALLOW_REMOTE=true if a container port bound to 127.0.0.1, a tunnel or an authenticating proxy is the only way in", s.Listen)
+	}
 	return nil
+}
+
+// LoopbackListen reports whether addr (host:port) only accepts connections
+// from this machine.
+func LoopbackListen(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func isTrue(v string) bool {
+	b, err := strconv.ParseBool(strings.TrimSpace(v))
+	return err == nil && b
 }
 
 func splitList(v string) []string {

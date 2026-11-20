@@ -24,7 +24,14 @@ type Config struct {
 	CORSOrigins  []string
 	AllowedHosts []string // in addition to localhost, 127.0.0.1 and ::1
 	Logger       *slog.Logger
+
+	// MaxConcurrent caps requests in flight; extra requests get 503.
+	// Zero means DefaultMaxConcurrent.
+	MaxConcurrent int
 }
+
+// DefaultMaxConcurrent is the default cap on requests in flight.
+const DefaultMaxConcurrent = 256
 
 type server struct {
 	cfg     Config
@@ -53,6 +60,7 @@ func New(cfg Config) http.Handler {
 	var h http.Handler = http.HandlerFunc(s.route)
 	h = s.withCORS(h)
 	h = s.withHostCheck(h)
+	h = s.withLimit(h)
 	return s.withAudit(h)
 }
 
@@ -83,6 +91,30 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusNotFound, "not found")
 	}
+}
+
+// withLimit refuses requests beyond the concurrency cap instead of queueing
+// them. /healthz is exempt.
+func (s *server) withLimit(next http.Handler) http.Handler {
+	n := s.cfg.MaxConcurrent
+	if n <= 0 {
+		n = DefaultMaxConcurrent
+	}
+	sem := make(chan struct{}, n)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		select {
+		case sem <- struct{}{}:
+			defer func() { <-sem }()
+			next.ServeHTTP(w, r)
+		default:
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusServiceUnavailable, "too many requests in flight")
+		}
+	})
 }
 
 // withHostCheck rejects requests whose Host header is not an allowed name,

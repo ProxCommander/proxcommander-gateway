@@ -293,3 +293,34 @@ func (s *seen) count() int {
 	defer s.mu.Unlock()
 	return len(s.reqs)
 }
+
+func TestConcurrencyLimit(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	ca := testpki.CA(t, "CA")
+	leaf := testpki.Leaf(t, "pve1", ca)
+	be := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		entered <- struct{}{}
+		<-release
+	}))
+	be.TLS = &tls.Config{Certificates: []tls.Certificate{testpki.TLSCert(leaf, ca)}}
+	be.StartTLS()
+	t.Cleanup(be.Close)
+	pool, _ := upstream.New([]upstream.Node{{Name: "pve1", URL: be.URL, Fingerprints: []string{pin.Fingerprint(ca.Cert.Raw)}}}, upstream.Options{})
+	pol, _ := policy.ForProfile("read-only")
+	h := New(Config{Pool: pool, Policy: pol, Authorizer: NewAPITokenAuth(token), MaxConcurrent: 1})
+
+	done := make(chan int)
+	go func() { done <- serve(h, "GET", "/api2/json/version", nil, "").Code }()
+	<-entered
+	if w := serve(h, "GET", "/api2/json/version", nil, ""); w.Code != 503 {
+		t.Errorf("over the cap: %d, want 503", w.Code)
+	}
+	if w := serve(h, "GET", "/healthz", nil, ""); w.Code != 200 {
+		t.Errorf("healthz over the cap: %d", w.Code)
+	}
+	close(release)
+	if code := <-done; code != 200 {
+		t.Errorf("first request: %d", code)
+	}
+}
