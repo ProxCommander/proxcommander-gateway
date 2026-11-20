@@ -1,9 +1,12 @@
 package state
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -48,6 +51,52 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	entries, _ := os.ReadDir(dir)
 	if len(entries) != 1 {
 		t.Errorf("leftover temp files: %v", entries)
+	}
+}
+
+func TestUpdateConcurrent(t *testing.T) {
+	dir := t.TempDir()
+	fp := strings.TrimSuffix(strings.Repeat("AB:", 32), ":")
+	const n = 20
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- Update(dir, func(s *State) error {
+				s.Nodes = append(s.Nodes, Node{Name: fmt.Sprintf("n%d", i), URL: "https://h:8006", Fingerprints: []string{fp}})
+				return nil
+			})
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	s, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Nodes) != n {
+		t.Fatalf("got %d nodes, want %d: lost updates", len(s.Nodes), n)
+	}
+}
+
+func TestUpdateErrorDoesNotSave(t *testing.T) {
+	dir := t.TempDir()
+	err := Update(dir, func(s *State) error {
+		s.Profile = "operator"
+		return errors.New("stop")
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if _, err := os.Stat(Path(dir)); !os.IsNotExist(err) {
+		t.Fatalf("state saved despite error: %v", err)
 	}
 }
 

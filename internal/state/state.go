@@ -20,9 +20,12 @@ import (
 // FileName is the state file's name inside the state directory.
 const FileName = "state.json"
 
+// LockName is the lock file that serialises writers.
+const LockName = "state.lock"
+
 // DefaultCORSOrigins are allowed when the state does not list any: the
-// hosted web app and the Expo web dev server.
-var DefaultCORSOrigins = []string{"https://proxcommander.app", "http://localhost:8081"}
+// hosted web app only. Development origins are opt-in (--cors-origins).
+var DefaultCORSOrigins = []string{"https://proxcommander.app"}
 
 // DefaultProfile is the least-privileged built-in profile.
 const DefaultProfile = "read-only"
@@ -81,6 +84,25 @@ func Load(dir string) (*State, error) {
 		}
 	}
 	return s, nil
+}
+
+// Update loads the state under an exclusive lock, applies fn and saves the
+// result, so concurrent writers (for example two "nodes add" runs) cannot
+// lose each other's changes. Nothing is saved if fn returns an error.
+func Update(dir string, fn func(*State) error) error {
+	unlock, err := lock(dir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	s, err := Load(dir)
+	if err != nil {
+		return err
+	}
+	if err := fn(s); err != nil {
+		return err
+	}
+	return s.Save(dir)
 }
 
 // Save writes the state to dir atomically with mode 0600.
